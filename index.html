@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>pixelpistol</title>
+//https://arxiv.org/abs/2006.10214
+<style>
+
+  
+  :root {
+    --black: #05070a;
+    --green: #00ff6e;
+    --mono:  "Comic Sans MS";
+  }
+
+
+  html, body {
+    height: 100%;
+    background: var(--black);
+    color: var(--green);
+    font-family: var(--mono);
+    overflow: hidden;
+  }
+
+  #stage {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+
+  #cam, #overlay {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+  }
+
+  #cam { filter: contrast(1.05) saturate(0.9) brightness(0.95); }
+
+  #overlay {
+    pointer-events: none;
+  }
+
+
+
+
+ 
+
+  #readout {
+    position: absolute;
+    top: 30px;
+    right: 30px;
+    font-size: 67px;
+    color: #ffffff;
+    text-align: right;
+  }
+
+  #boot {
+    position: absolute;
+    background: var(--black);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+  }
+  #boot .msg { font-size: 12px; letter-spacing: 0.2em; color: var(--green); }
+  #boot .bar {
+    width: 240px; height: 3px; background: rgb(255 255 255 / 0.1); border-radius: 2px;
+    position: relative; overflow: hidden;
+  }
+  #boot .bar::after {
+    content: "";
+    position: absolute; top: 0; left: -40%;
+    width: 40%; height: 100%;
+    background: var(--green);
+    animation: sweep 1s ease-in infinite;
+  }
+  @keyframes sweep {
+    0% { left: -40%; }
+    100% { left: 100%; }
+  }
+  #boot .allow {
+    font-size: 10px; color: #56636c; letter-spacing: 0.1em;
+    max-width: 300px; text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="cam" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+
+
+  <div id="readout">
+    hand: <b id="handState">NONE</b><br/>
+    pose: <b id="poseState">NONE</b><br/>
+  </div>
+
+  <div id="statusline">
+    <span><i class="dot" id="dotCam"></i>camera</span>
+    <span><i class="dot" id="dotModel"></i>tracker</span>
+  </div>
+
+  <div id="boot">
+    <div class="msg">pixelpistol v0.1</div>
+    <div class="bar"></div>
+    <div class="allow">GIVE ME ACCESS TO YOUR WEBCAM</div>
+  </div>
+<!--
+ <div id="crosshair">
+  </div> -->
+  
+</div>
+
+<script type="module">
+import {
+  HandLandmarker,
+  FilesetResolver,
+
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+//const on my tants till i splurge
+const video = document.getElementById("cam");
+const canvas = document.getElementById("overlay");
+const ctx = canvas.getContext("2d");
+const boot = document.getElementById("boot");
+const dotCam = document.getElementById("dotCam");
+const dotModel = document.getElementById("dotModel");
+const handState = document.getElementById("handState");
+const poseState = document.getElementById("poseState");
+
+let handLandmarker = null;
+let lastVideoTime = -1;
+let lastFrameTs = performance.now();
+
+//stole these from mediapipe docs
+const CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],          
+  [0,5],[5,6],[6,7],[7,8],        
+  [5,9],[9,10],[10,11],[11,12],   
+  [9,13],[13,14],[14,15],[15,16],   
+  [13,17],[17,18],[18,19],[19,20],  
+  [0,17]                            
+];
+
+async function setupCamera() {
+  const camVideo = await navigator.mediaDevices.getUserMedia({video: { width: 1280, height: 720 },audio: false,});
+  video.srcObject = camVideo;
+  dotCam.classList.add("on");
+  return new Promise((resolve) => {
+    video.onloadedmetadata = () => {
+      video.play();
+      resolve();
+    };
+  });
+}
+//pre trained neural network model for hand tracking, using mediapipe library
+async function setupModel() {
+  const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU",
+    },
+    numHands: 1,
+    runningMode: "VIDEO",
+    minHandDetectionConfidence: 0.3,
+    minHandPresenceConfidence: 0.6,
+    minTrackingConfidence: 0.6,
+  });
+  dotModel.classList.add("ready");
+}
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resizeCanvas);
+
+function drawLines(landmarks) {
+  const w = canvas.width;
+  const h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  ctx.strokeStyle = "rgba(0, 0, 0, 1)";
+  ctx.lineWidth = 2;
+  for (const [a, b] of CONNECTIONS) {
+    const pa = landmarks[a];
+    const pb = landmarks[b];
+    ctx.beginPath();
+    ctx.moveTo(pa.x * w, pa.y * h);
+    ctx.lineTo(pb.x * w, pb.y * h);
+    ctx.stroke();
+  }
+
+
+  landmarks.forEach((pt, i) => {
+  const x = pt.x * w;
+  const y = pt.y * h;
+  const isTip = [4, 8, 12, 16, 20].includes(i);
+  
+  ctx.beginPath();
+  ctx.arc(x, y, isTip ? 5 : 3, 0, 3.14159 * 2);
+  ctx.fillStyle = isTip ? "#ffb703" : "#4de0a4"; 
+  ctx.fill();
+});
+}
+
+function flop() {
+  const now = performance.now();
+
+  if (video.currentTime !== lastVideoTime && handLandmarker) {
+    lastVideoTime = video.currentTime;
+    const result = handLandmarker.detectForVideo(video, now);
+
+    if (result.landmarks && result.landmarks.length > 0) {
+      drawLines(result.landmarks[0]);
+      handState.textContent = "TRACKED";
+    } else {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      handState.textContent = "NONE";
+      poseState.textContent = "NONE";
+    }
+  }
+  requestAnimationFrame(flop);
+}
+
+async function main() {
+  resizeCanvas();
+  try {
+    await setupCamera();
+    await setupModel();
+    boot.style.display = "none";
+    flop();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+main();
+</script>
+</body>
+</html>
